@@ -148,6 +148,118 @@
     )
 )
 
+;; Increment user reputation (only authorized contracts/admin)
+(define-public (increment-reputation
+        (user principal)
+        (points uint)
+    )
+    (begin
+        (asserts! (not (var-get contract-paused)) ERR-UNAUTHORIZED)
+        (asserts!
+            (or
+                (is-eq tx-sender (var-get contract-owner))
+                (default-to false (map-get? authorized-contracts tx-sender))
+            )
+            ERR-UNAUTHORIZED
+        )
+        (asserts! (> points u0) ERR-INVALID-AMOUNT)
+        (match (map-get? user-data user)
+            current-data (begin
+                (asserts! (> (get staked-amount current-data) u0)
+                    ERR-INSUFFICIENT-STAKE
+                )
+                (let ((new-score (+ (get reputation-score current-data) points)))
+                    (map-set user-data user
+                        (merge current-data { reputation-score: new-score })
+                    )
+                    (print {
+                        event: "ReputationUpdated",
+                        user: user,
+                        old-score: (get reputation-score current-data),
+                        new-score: new-score,
+                    })
+                    (ok new-score)
+                )
+            )
+            ERR-USER-NOT-FOUND
+        )
+    )
+)
+
+;; Decrement user reputation (only authorized contracts/admin)
+(define-public (decrement-reputation
+        (user principal)
+        (points uint)
+    )
+    (begin
+        (asserts! (not (var-get contract-paused)) ERR-UNAUTHORIZED)
+        (asserts!
+            (or
+                (is-eq tx-sender (var-get contract-owner))
+                (default-to false (map-get? authorized-contracts tx-sender))
+            )
+            ERR-UNAUTHORIZED
+        )
+        (asserts! (> points u0) ERR-INVALID-AMOUNT)
+        (match (map-get? user-data user)
+            current-data (begin
+                (asserts! (> (get staked-amount current-data) u0)
+                    ERR-INSUFFICIENT-STAKE
+                )
+                (let (
+                        (current-score (get reputation-score current-data))
+                        (new-score (if (<= current-score points)
+                            u0
+                            (- current-score points)
+                        ))
+                    )
+                    (map-set user-data user
+                        (merge current-data { reputation-score: new-score })
+                    )
+                    (print {
+                        event: "ReputationUpdated",
+                        user: user,
+                        old-score: current-score,
+                        new-score: new-score,
+                    })
+                    (ok new-score)
+                )
+            )
+            ERR-USER-NOT-FOUND
+        )
+    )
+)
+
+;; Apply reputation decay for a user (callable by anyone)
+(define-public (decay-reputation (user principal))
+    (match (map-get? user-data user)
+        current-data (let (
+                (current-score (get reputation-score current-data))
+                (decay-amount (/ (* current-score (var-get decay-rate)) u100))
+                (new-score (if (<= current-score decay-amount)
+                    u0
+                    (- current-score decay-amount)
+                ))
+            )
+            (map-set user-data user
+                (merge current-data {
+                    reputation-score: new-score,
+                    last-decay-block: stacks-block-height,
+                })
+            )
+            (print {
+                event: "ReputationDecayed",
+                user: user,
+                old-score: current-score,
+                new-score: new-score,
+                decay-amount: decay-amount,
+            })
+            (ok new-score)
+        )
+        ERR-USER-NOT-FOUND
+    )
+)
+
 ;; read only functions
 
 ;; Get user staked amount
@@ -181,4 +293,12 @@
 ;; Check if contract is authorized
 (define-read-only (is-authorized-contract (contract principal))
     (default-to false (map-get? authorized-contracts contract))
+)
+
+;; Get user reputation score
+(define-read-only (get-reputation (user principal))
+    (match (map-get? user-data user)
+        user-info (ok (get reputation-score user-info))
+        ERR-USER-NOT-FOUND
+    )
 )
