@@ -302,3 +302,234 @@
         ERR-USER-NOT-FOUND
     )
 )
+
+;; Mint a new reputation badge NFT
+(define-public (mint-badge
+        (recipient principal)
+        (badge-name (string-ascii 64))
+        (badge-description (string-ascii 256))
+    )
+    (let ((badge-id (var-get next-badge-id)))
+        (asserts! (not (var-get contract-paused)) ERR-UNAUTHORIZED)
+        (asserts!
+            (or
+                (is-eq tx-sender (var-get contract-owner))
+                (default-to false (map-get? authorized-contracts tx-sender))
+            )
+            ERR-UNAUTHORIZED
+        )
+        (match (map-get? user-data recipient)
+            user-info (begin
+                (asserts!
+                    (>= (get reputation-score user-info) MIN-REPUTATION-FOR-BADGE)
+                    ERR-INSUFFICIENT-REPUTATION
+                )
+                (asserts! (is-none (map-get? badge-metadata badge-id))
+                    ERR-BADGE-EXISTS
+                )
+                (try! (nft-mint? reputation-badge badge-id recipient))
+                (map-set badge-metadata badge-id {
+                    name: badge-name,
+                    description: badge-description,
+                    creator: tx-sender,
+                })
+                (map-set user-badges {
+                    user: recipient,
+                    badge-id: badge-id,
+                }
+                    true
+                )
+                (var-set next-badge-id (+ badge-id u1))
+                (print {
+                    event: "BadgeMinted",
+                    recipient: recipient,
+                    badge-id: badge-id,
+                    name: badge-name,
+                    creator: tx-sender,
+                })
+                (ok badge-id)
+            )
+            ERR-USER-NOT-FOUND
+        )
+    )
+)
+
+;; Transfer badge NFT to another user
+(define-public (transfer-badge
+        (badge-id uint)
+        (recipient principal)
+    )
+    (let ((sender tx-sender))
+        (asserts! (not (var-get contract-paused)) ERR-UNAUTHORIZED)
+        (asserts! (is-some (map-get? badge-metadata badge-id))
+            ERR-BADGE-NOT-FOUND
+        )
+        (match (nft-get-owner? reputation-badge badge-id)
+            current-owner (begin
+                (asserts! (is-eq current-owner sender) ERR-UNAUTHORIZED)
+                (try! (nft-transfer? reputation-badge badge-id sender recipient))
+                (map-delete user-badges {
+                    user: sender,
+                    badge-id: badge-id,
+                })
+                (map-set user-badges {
+                    user: recipient,
+                    badge-id: badge-id,
+                }
+                    true
+                )
+                (print {
+                    event: "BadgeTransferred",
+                    from: sender,
+                    to: recipient,
+                    badge-id: badge-id,
+                })
+                (ok true)
+            )
+            ERR-BADGE-NOT-FOUND
+        )
+    )
+)
+
+;; Burn a badge NFT (only owner or admin)
+(define-public (burn-badge (badge-id uint))
+    (let ((sender tx-sender))
+        (asserts! (not (var-get contract-paused)) ERR-UNAUTHORIZED)
+        (asserts! (is-some (map-get? badge-metadata badge-id))
+            ERR-BADGE-NOT-FOUND
+        )
+        (match (nft-get-owner? reputation-badge badge-id)
+            current-owner (begin
+                (asserts!
+                    (or
+                        (is-eq current-owner sender)
+                        (is-eq sender (var-get contract-owner))
+                        (default-to false (map-get? authorized-contracts sender))
+                    )
+                    ERR-UNAUTHORIZED
+                )
+                (try! (nft-burn? reputation-badge badge-id current-owner))
+                (map-delete user-badges {
+                    user: current-owner,
+                    badge-id: badge-id,
+                })
+                (print {
+                    event: "BadgeBurned",
+                    owner: current-owner,
+                    badge-id: badge-id,
+                    burned-by: sender,
+                })
+                (ok true)
+            )
+            ERR-BADGE-NOT-FOUND
+        )
+    )
+)
+
+;; Administrative Functions
+
+;; Set new contract owner (only current owner)
+(define-public (set-contract-owner (new-owner principal))
+    (begin
+        (asserts! (is-eq tx-sender (var-get contract-owner)) ERR-UNAUTHORIZED)
+        (var-set contract-owner new-owner)
+        (print {
+            event: "OwnershipTransferred",
+            old-owner: tx-sender,
+            new-owner: new-owner,
+        })
+        (ok true)
+    )
+)
+
+;; Pause/unpause contract (only owner)
+(define-public (set-contract-paused (paused bool))
+    (begin
+        (asserts! (is-eq tx-sender (var-get contract-owner)) ERR-UNAUTHORIZED)
+        (var-set contract-paused paused)
+        (print {
+            event: "ContractPauseStatusChanged",
+            paused: paused,
+            changed-by: tx-sender,
+        })
+        (ok paused)
+    )
+)
+
+;; Authorize/deauthorize contract to modify reputation (only owner)
+(define-public (set-authorized-contract
+        (contract-address principal)
+        (authorized bool)
+    )
+    (begin
+        (asserts! (is-eq tx-sender (var-get contract-owner)) ERR-UNAUTHORIZED)
+        (if authorized
+            (map-set authorized-contracts contract-address true)
+            (map-delete authorized-contracts contract-address)
+        )
+        (print {
+            event: "ContractAuthorizationChanged",
+            contract: contract-address,
+            authorized: authorized,
+            changed-by: tx-sender,
+        })
+        (ok authorized)
+    )
+)
+
+;; Update decay rate (only owner)
+(define-public (set-decay-rate (new-rate uint))
+    (begin
+        (asserts! (is-eq tx-sender (var-get contract-owner)) ERR-UNAUTHORIZED)
+        (asserts! (<= new-rate MAX-DECAY-RATE) ERR-INVALID-AMOUNT)
+        (var-set decay-rate new-rate)
+        (print {
+            event: "DecayRateUpdated",
+            old-rate: (var-get decay-rate),
+            new-rate: new-rate,
+            changed-by: tx-sender,
+        })
+        (ok new-rate)
+    )
+)
+
+;; Update minimum stake amount (only owner)
+(define-public (set-min-stake-amount (new-amount uint))
+    (begin
+        (asserts! (is-eq tx-sender (var-get contract-owner)) ERR-UNAUTHORIZED)
+        (asserts! (> new-amount u0) ERR-INVALID-AMOUNT)
+        (var-set min-stake-amount new-amount)
+        (print {
+            event: "MinStakeUpdated",
+            old-amount: (var-get min-stake-amount),
+            new-amount: new-amount,
+            changed-by: tx-sender,
+        })
+        (ok new-amount)
+    )
+)
+
+;; Additional Read-Only Functions for Badge System
+
+;; Get badge metadata
+(define-read-only (get-badge-metadata (badge-id uint))
+    (map-get? badge-metadata badge-id)
+)
+
+;; Check if user owns a specific badge
+(define-read-only (user-owns-badge
+        (user principal)
+        (badge-id uint)
+    )
+    (default-to false
+        (map-get? user-badges {
+            user: user,
+            badge-id: badge-id,
+        })
+    )
+)
+
+;; Get badge owner
+(define-read-only (get-badge-owner (badge-id uint))
+    (nft-get-owner? reputation-badge badge-id)
+)
